@@ -26,7 +26,7 @@ COPY config.json .
 COPY telegram_bot.py .
 
 # Pre-download YOLOv8 model during build to avoid downloading on every start
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8x.pt')"
+RUN python -c "from ultralytics import YOLO; YOLO('yolov8m.pt')"
 
 # Create directory for temporary files
 RUN mkdir -p /tmp

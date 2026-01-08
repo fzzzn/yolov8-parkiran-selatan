@@ -1,6 +1,7 @@
 import time
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO # type: ignore
 import os
 import json
@@ -10,6 +11,13 @@ from telegram_bot import send_telegram_photo
 
 # Load environment variables
 load_dotenv()
+
+# Fix PyTorch CPU compatibility issues on VMs
+torch.set_num_threads(4)
+os.environ['OMP_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+# Disable oneDNN for CPU compatibility
+torch.backends.mkldnn.enabled = False
 
 # Load areas from JSON config
 with open('config.json', 'r') as f:
@@ -34,11 +42,11 @@ RTSP_URL = os.getenv("RTSP_URL")
 CAPTURE_INTERVAL = 60  # seconds - capture, analyze, and send every minute
 RTSP_RETRY_TIMEOUT = 10  # seconds to wait before retrying failed RTSP connection
 
-# YOLO model: use yolov8x.pt for best detection in extremely crowded scenes
-MODEL_PATH = "yolov8x.pt"  # Extra large model for maximum accuracy
+# YOLO model: use yolov8m.pt for good detection with CPU compatibility
+MODEL_PATH = "yolov8m.pt"  # Medium model - good balance for CPU
 CONF = 0.01  # Absolute minimum confidence for maximum detection
 IOU_THRESHOLD = 0.10  # Maximum overlapping detection tolerance
-IMG_SIZE = 1280  # Balanced size for CPU inference
+IMG_SIZE = 640  # Standard size for stable CPU inference
 
 # COCO class ids: 3=motorcycle
 DETECT_CLASSES = [3]  # Motorcycle only
@@ -120,37 +128,9 @@ def read_frame(cap, url, max_retries=3):
 
 
 def preprocess_frame(frame):
-    """Enhanced preprocessing for extremely crowded motorcycle parking"""
-    # 1. Resize to higher resolution if needed for better detection
-    h, w = frame.shape[:2]
-    if w < 1920:  # Upscale to moderate resolution for CPU inference
-        scale = 1920 / w
-        frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    
-    # 2. Light denoising (faster than full denoising)
-    denoised = cv2.bilateralFilter(frame, 9, 75, 75)
-    
-    # 3. More aggressive CLAHE for better contrast in crowded areas
-    lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))  # Increased clip limit
-    l = clahe.apply(l)
-    enhanced = cv2.merge([l, a, b])
-    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-    
-    # 4. Even stronger sharpening for better edge and detail detection
-    kernel = np.array([[-1, -1, -1, -1, -1],
-                       [-1,  2,  2,  2, -1],
-                       [-1,  2, 10,  2, -1],  # Increased center weight
-                       [-1,  2,  2,  2, -1],
-                       [-1, -1, -1, -1, -1]]) / 10.0
-    sharpened = cv2.filter2D(enhanced, -1, kernel)
-    
-    # 5. Additional unsharp masking for even more detail
-    gaussian = cv2.GaussianBlur(sharpened, (0, 0), 2.0)
-    sharpened = cv2.addWeighted(sharpened, 1.5, gaussian, -0.5, 0)
-    
-    return sharpened
+    """Minimal preprocessing for CPU compatibility"""
+    # Return frame as-is to avoid CPU compatibility issues
+    return frame
 
 def add_timestamp_overlay(frame):
     """Add timestamp overlay to frame"""
@@ -319,7 +299,7 @@ def check_and_download_model():
         return True
     
     print(f"Model not found: {model_path}")
-    print(f"Downloading YOLOv8 Extra-Large model... (this may take a few minutes)")
+    print(f"Downloading YOLOv8 Medium model... (this may take a few minutes)")
     
     try:
         # YOLO() will automatically download if missing
