@@ -8,6 +8,7 @@ services:
       - .env
     environment:
       - YOLO_CONFIG_DIR=/tmp/Ultralytics
+      - NNPACK_DISABLE=1
     volumes:
       # Mount config.json if you need to update parking areas without rebuilding
       - ./config.json:/app/config.json:ro
