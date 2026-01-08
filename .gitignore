@@ -11,3 +11,4 @@ dist/
 build/
 venv/
 yolov8x.pt
+test_frame.jpg

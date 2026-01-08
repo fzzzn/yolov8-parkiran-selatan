@@ -1,18 +1,37 @@
 import cv2
 import numpy as np
+import json
+import os
+from dotenv import load_dotenv
+
+# Configuration
+AREA_DEFINITIONS = [
+    {"id": "orange", "name": "Orange Area", "color": [0, 165, 255], "emoji": "🟧"},
+    {"id": "red", "name": "Red Area", "color": [0, 0, 255], "emoji": "🟥"},
+    # Add more areas as needed:
+    # {"id": "green", "name": "Green Area", "color": [0, 255, 0], "emoji": "🟢"},
+]
 
 # Global variables
 points = []
-current_area = "ORANGE"
-areas = {"ORANGE": [], "RED": []}
+current_area_index = 0
+areas = {area["id"]: [] for area in AREA_DEFINITIONS}
 img_display = None
 img_original = None
 scale_factor = 1.0
-dragging_point = None  # (area_name, point_index)
+dragging_point = None  # (area_id, point_index)
 drag_mode = False
 
+def get_current_area():
+    """Get current area configuration"""
+    return AREA_DEFINITIONS[current_area_index] if current_area_index < len(AREA_DEFINITIONS) else None
+
+def get_area_config(area_id):
+    """Get area configuration by ID"""
+    return next((a for a in AREA_DEFINITIONS if a["id"] == area_id), None)
+
 def mouse_callback(event, x, y, flags, param):
-    global points, img_display, current_area, scale_factor, dragging_point, drag_mode
+    global points, img_display, current_area_index, scale_factor, dragging_point, drag_mode
     
     # Convert display coordinates to original image coordinates
     orig_x = int(x / scale_factor)
@@ -20,14 +39,16 @@ def mouse_callback(event, x, y, flags, param):
     
     if event == cv2.EVENT_LBUTTONDOWN:
         # Check if clicking near an existing point in completed areas
-        for area_name, area_points in areas.items():
+        for area_id, area_points in areas.items():
             if area_points:
                 for i, (px, py) in enumerate(area_points):
                     dist = np.sqrt((orig_x - px)**2 + (orig_y - py)**2)
                     if dist < 20:  # Within 20 pixels
-                        dragging_point = (area_name, i)
+                        dragging_point = (area_id, i)
                         drag_mode = True
-                        print(f"Dragging {area_name} point {i+1}")
+                        area_config = get_area_config(area_id)
+                        if area_config:
+                            print(f"Dragging {area_config['name']} point {i+1}")
                         return
         
         # Check if clicking near current points
@@ -41,60 +62,68 @@ def mouse_callback(event, x, y, flags, param):
         
         # Not dragging, add new point
         if not drag_mode:
-            points.append((orig_x, orig_y))
-            print(f"{current_area} point {len(points)}: ({orig_x}, {orig_y})")
-            
-            # Close polygon if 4 points
-            if len(points) == 4:
-                areas[current_area] = points.copy()
-                print(f"\n{current_area} area completed!")
-                print(f"Coordinates: {points}\n")
+            current_area = get_current_area()
+            if current_area:
+                points.append((orig_x, orig_y))
+                print(f"{current_area['name']} point {len(points)}: ({orig_x}, {orig_y})")
                 
-                if current_area == "ORANGE":
-                    print("Now define RED area (click 4 corners)")
-                    current_area = "RED"
-                else:
-                    print("\nAll areas defined!")
-                    print_areas_code()
+                # Close polygon if 4 points
+                if len(points) == 4:
+                    areas[current_area['id']] = points.copy()
+                    print(f"\n{current_area['emoji']} {current_area['name']} completed!")
+                    print(f"Coordinates: {points}\n")
+                    
+                    current_area_index += 1
+                    if current_area_index < len(AREA_DEFINITIONS):
+                        next_area = AREA_DEFINITIONS[current_area_index]
+                        print(f"Now define {next_area['emoji']} {next_area['name']} (click 4 corners)")
+                    else:
+                        print("\n✓ All areas defined!")
+                        save_to_json()
+                    
+                    points = []
                 
-                points = []
-            
-            redraw_display()
+                redraw_display()
     
     elif event == cv2.EVENT_MOUSEMOVE:
         if drag_mode and dragging_point:
-            area_name, point_idx = dragging_point
-            if area_name == "current":
+            area_id, point_idx = dragging_point
+            if area_id == "current":
                 points[point_idx] = (orig_x, orig_y)
             else:
-                areas[area_name][point_idx] = (orig_x, orig_y)
+                areas[area_id][point_idx] = (orig_x, orig_y)
             redraw_display()
     
     elif event == cv2.EVENT_LBUTTONUP:
         if drag_mode and dragging_point:
-            area_name, point_idx = dragging_point
-            if area_name == "current":
+            area_id, point_idx = dragging_point
+            if area_id == "current":
                 points[point_idx] = (orig_x, orig_y)
                 print(f"Moved current point {point_idx+1} to ({orig_x}, {orig_y})")
             else:
-                areas[area_name][point_idx] = (orig_x, orig_y)
-                print(f"Moved {area_name} point {point_idx+1} to ({orig_x}, {orig_y})")
-                if area_name == "RED" and all(areas.values()):
-                    print_areas_code()
+                areas[area_id][point_idx] = (orig_x, orig_y)
+                area_config = get_area_config(area_id)
+                if area_config:
+                    print(f"Moved {area_config['name']} point {point_idx+1} to ({orig_x}, {orig_y})")
+                # Check if all areas are complete
+                if all(areas[a['id']] for a in AREA_DEFINITIONS):
+                    save_to_json()
             dragging_point = None
             drag_mode = False
             redraw_display()
 
 def redraw_display():
-    global img_display, img_original, scale_factor, points, areas, current_area
+    global img_display, img_original, scale_factor, points, areas, current_area_index
     
     # Start with scaled original
     img_display = cv2.resize(img_original, None, fx=scale_factor, fy=scale_factor)
     
     # Draw completed areas
-    for area_name, area_points in areas.items():
+    for area_config in AREA_DEFINITIONS:
+        area_id = area_config["id"]
+        area_points = areas.get(area_id, [])
         if area_points:
-            color = (0, 165, 255) if area_name == "ORANGE" else (0, 0, 255)
+            color = tuple(area_config["color"])
             pts = np.array([(int(x*scale_factor), int(y*scale_factor)) for x, y in area_points])
             cv2.polylines(img_display, [pts], True, color, 3)
             # Fill with semi-transparent
@@ -125,45 +154,101 @@ def redraw_display():
                 cv2.line(img_display, (prev_x, prev_y), (disp_x, disp_y), color, 2)
     
     # Add instructions
-    cv2.putText(img_display, f"Defining: {current_area} ({len(points)}/4)", 
+    current_area = get_current_area()
+    if current_area:
+        status_text = f"Defining: {current_area['emoji']} {current_area['name']} ({len(points)}/4)"
+    else:
+        status_text = "All areas defined! Press 's' to save"
+    
+    cv2.putText(img_display, status_text, 
                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-    cv2.putText(img_display, "Click to add, drag to move | 'r' reset | 'q' quit", 
+    cv2.putText(img_display, "Click to add, drag to move | 'r' reset | 's' save | 'q' quit", 
                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
     
     cv2.imshow("Define Areas", img_display)
 
-def print_areas_code():
+def capture_frame_from_rtsp(rtsp_url, output_path="test_frame.jpg"):
+    """Capture a frame from RTSP stream"""
+    print(f"Connecting to RTSP stream...")
+    print(f"URL: {rtsp_url[:20]}...")
+    
+    cap = cv2.VideoCapture(rtsp_url)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    
+    if not cap.isOpened():
+        print("ERROR: Could not connect to RTSP stream")
+        print("Please check:")
+        print("  1. RTSP_URL in .env file is correct")
+        print("  2. Camera is accessible from this network")
+        print("  3. Credentials are valid")
+        return False
+    
+    print("Connected! Capturing frame...")
+    
+    # Discard first few frames to get fresh image
+    for _ in range(5):
+        cap.read()
+    
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret or frame is None:
+        print("ERROR: Could not read frame from stream")
+        return False
+    
+    cv2.imwrite(output_path, frame)
+    h, w = frame.shape[:2]
+    print(f"✓ Frame captured: {w}x{h} saved to {output_path}\n")
+    return True
+
+def save_to_json():
+    """Save areas to config.json"""
+    config = {"areas": []}
+    
+    for area_config in AREA_DEFINITIONS:
+        area_id = area_config["id"]
+        if areas.get(area_id):
+            config["areas"].append({
+                "id": area_id,
+                "name": area_config["name"],
+                "color": area_config["color"],
+                "polygon": areas[area_id]
+            })
+    
+    with open("config.json", "w") as f:
+        json.dump(config, f, indent=2)
+    
     print("\n" + "="*60)
-    print("COPY THIS TO areas.py:")
+    print("✓ Configuration saved to config.json")
     print("="*60)
-    print("import numpy as np\n")
-    
-    if areas["ORANGE"]:
-        print("# 🟧 ORANGE AREA (upper parking section)")
-        print("ORANGE_AREA = np.array([")
-        for i, (x, y) in enumerate(areas["ORANGE"]):
-            label = ["top-left", "top-right", "bottom-right", "bottom-left"][i]
-            print(f"    ({x:4d}, {y:4d}),    # {label}")
-        print("], dtype=np.int32)\n")
-    
-    if areas["RED"]:
-        print("# 🟥 RED AREA (lower parking section)")
-        print("RED_AREA = np.array([")
-        for i, (x, y) in enumerate(areas["RED"]):
-            label = ["top-left", "top-right", "bottom-right", "bottom-left"][i]
-            print(f"    ({x:4d}, {y:4d}),    # {label}")
-        print("], dtype=np.int32)")
-    
     print("="*60)
 
 def main():
     global img_display, img_original, scale_factor
     
+    # Load environment variables
+    load_dotenv()
+    
+    # Check if test frame exists, if not try to capture it
+    if not os.path.exists("test_frame.jpg"):
+        print("test_frame.jpg not found. Attempting to capture from RTSP stream...\n")
+        rtsp_url = os.getenv("RTSP_URL")
+        
+        if not rtsp_url:
+            print("ERROR: RTSP_URL not found in .env file")
+            print("Please create a .env file with RTSP_URL=your_camera_url")
+            return
+        
+        if not capture_frame_from_rtsp(rtsp_url):
+            print("\nFailed to capture frame. Please:")
+            print("  1. Check your RTSP camera connection")
+            print("  2. Or manually save a frame as test_frame.jpg")
+            return
+    
     # Load image
     img = cv2.imread("test_frame.jpg")
     if img is None:
-        print("ERROR: test_frame.jpg not found")
-        print("Run: python capture_frame.py first")
+        print("ERROR: Could not load test_frame.jpg")
         return
     
     img_original = img.copy()
@@ -184,12 +269,15 @@ def main():
     print("="*60)
     print("INTERACTIVE AREA DEFINITION")
     print("="*60)
+    print(f"\nTotal areas to define: {len(AREA_DEFINITIONS)}")
+    for area in AREA_DEFINITIONS:
+        print(f"  {area['emoji']} {area['name']}")
     print("\nInstructions:")
-    print("1. Click 4 corners of ORANGE area (top-left, top-right, bottom-right, bottom-left)")
-    print("2. Then click 4 corners of RED area")
-    print("3. Drag any point to adjust position")
+    print("1. Click 4 corners for each area (top-left, top-right, bottom-right, bottom-left)")
+    print("2. Drag any point to adjust position")
+    print("3. Press 's' to save to config.json")
     print("4. Press 'r' to reset, 'q' to quit\n")
-    print("Starting with ORANGE area...\n")
+    print(f"Starting with {AREA_DEFINITIONS[0]['emoji']} {AREA_DEFINITIONS[0]['name']}...\n")
     
     cv2.namedWindow("Define Areas", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Define Areas", int(w*scale_factor), int(h*scale_factor))
@@ -201,12 +289,17 @@ def main():
         
         if key == ord('q'):
             break
+        elif key == ord('s'):
+            # Save current configuration
+            if any(areas.values()):
+                save_to_json()
+                print("\n✓ Configuration saved! You can close the window or continue editing.")
         elif key == ord('r'):
-            print("\nReset! Starting over with ORANGE area...")
+            print(f"\nReset! Starting over with {AREA_DEFINITIONS[0]['name']}...")
             points.clear()
-            areas["ORANGE"].clear()
-            areas["RED"].clear()
-            current_area = "ORANGE"
+            for area_id in areas:
+                areas[area_id].clear()
+            current_area_index = 0
             redraw_display()
     
     cv2.destroyAllWindows()
