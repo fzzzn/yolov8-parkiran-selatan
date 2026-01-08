@@ -3,13 +3,29 @@ import cv2
 import numpy as np
 from ultralytics import YOLO # type: ignore
 import os
+import json
 from dotenv import load_dotenv
 
-from areas import ORANGE_AREA, RED_AREA
 from telegram_bot import send_telegram_photo
 
 # Load environment variables
 load_dotenv()
+
+# Load areas from JSON config
+with open('config.json', 'r') as f:
+    config = json.load(f)
+
+# Parse areas dynamically
+AREAS = []
+for area_config in config['areas']:
+    AREAS.append({
+        'id': area_config['id'],
+        'name': area_config['name'],
+        'color': tuple(area_config['color']),
+        'polygon': np.array(area_config['polygon'], dtype=np.int32)
+    })
+
+print(f"Loaded {len(AREAS)} parking areas: {', '.join([a['name'] for a in AREAS])}")
 
 # -------------------------
 # CONFIG
@@ -22,14 +38,14 @@ RTSP_RETRY_TIMEOUT = 10  # seconds to wait before retrying failed RTSP connectio
 MODEL_PATH = "yolov8x.pt"  # Extra large model for maximum accuracy
 CONF = 0.01  # Absolute minimum confidence for maximum detection
 IOU_THRESHOLD = 0.10  # Maximum overlapping detection tolerance
-IMG_SIZE = 1536  # Even larger for better small/distant object detection
+IMG_SIZE = 1280  # Balanced size for CPU inference
 
 # COCO class ids: 3=motorcycle
 DETECT_CLASSES = [3]  # Motorcycle only
 MOTORCYCLE_CLASS = 3
 
 # Advanced detection settings
-USE_TTA = True  # Test-Time Augmentation
+USE_TTA = False  # Test-Time Augmentation disabled for CPU inference stability
 MAX_DET = 1000  # Maximum possible detections for extremely dense parking
 MIN_AREA = 150  # Very small minimum area for distant/partial motorcycles
 
@@ -57,6 +73,21 @@ def count_motorcycles_in_area(dets_xyxy, poly):
         if point_in_poly((cx, cy), poly):
             c += 1
     return c
+
+
+def count_motorcycles_per_area(dets):
+    """Count motorcycles in each defined area"""
+    area_counts = []
+    for area in AREAS:
+        count = count_motorcycles_in_area(dets, area['polygon'])
+        status = "DETECTED" if count > 0 else "EMPTY"
+        area_counts.append({
+            'id': area['id'],
+            'name': area['name'],
+            'count': count,
+            'status': status
+        })
+    return area_counts
 
 
 # -------------------------
@@ -92,8 +123,8 @@ def preprocess_frame(frame):
     """Enhanced preprocessing for extremely crowded motorcycle parking"""
     # 1. Resize to higher resolution if needed for better detection
     h, w = frame.shape[:2]
-    if w < 2048:  # Upscale to even higher resolution
-        scale = 2048 / w
+    if w < 1920:  # Upscale to moderate resolution for CPU inference
+        scale = 1920 / w
         frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
     # 2. Light denoising (faster than full denoising)
@@ -179,19 +210,21 @@ def detect_motorcycles(model, frame):
     if len(dets) > 0:
         widths = dets[:, 2] - dets[:, 0]
         heights = dets[:, 3] - dets[:, 1]
-        areas = widths * heights
-        valid_mask = areas > MIN_AREA
+        areas_size = widths * heights
+        valid_mask = areas_size > MIN_AREA
         dets = dets[valid_mask]
         confs = confs[valid_mask]
         classes = classes[valid_mask]
     
-    # Filter to only keep detections within orange or red areas
+    # Filter to only keep detections within any defined area
     if len(dets) > 0:
         in_area_mask = np.zeros(len(dets), dtype=bool)
         for i, box in enumerate(dets):
             cx, cy = box_center_xy(box)
-            if point_in_poly((cx, cy), ORANGE_AREA) or point_in_poly((cx, cy), RED_AREA):
-                in_area_mask[i] = True
+            for area in AREAS:
+                if point_in_poly((cx, cy), area['polygon']):
+                    in_area_mask[i] = True
+                    break
         
         dets = dets[in_area_mask]
         confs = confs[in_area_mask]
@@ -205,23 +238,16 @@ def analyze_areas(dets, confs, classes):
     motorcycles = np.sum(classes == MOTORCYCLE_CLASS) if len(classes) > 0 else 0
     avg_conf = np.mean(confs) if len(confs) > 0 else 0
 
-    orange_count = count_motorcycles_in_area(dets, ORANGE_AREA)
-    red_count = count_motorcycles_in_area(dets, RED_AREA)
-    
-    orange_status = "DETECTED" if orange_count > 0 else "EMPTY"
-    red_status = "DETECTED" if red_count > 0 else "EMPTY"
+    area_counts = count_motorcycles_per_area(dets)
 
     return {
         'motorcycles': motorcycles,
         'avg_conf': avg_conf,
-        'orange_count': orange_count,
-        'red_count': red_count,
-        'orange_status': orange_status,
-        'red_status': red_status
+        'areas': area_counts
     }
 
 
-def annotate_frame(frame, dets, confs, orange_count, red_count, orange_status, red_status):
+def annotate_frame(frame, dets, confs, area_counts):
     """Add all visual annotations to the frame"""
     # Draw bounding boxes with confidence
     for i, box in enumerate(dets):
@@ -234,20 +260,23 @@ def annotate_frame(frame, dets, confs, orange_count, red_count, orange_status, r
         cv2.putText(frame, label, (x1, y1-5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-    # Draw polygons
-    cv2.polylines(frame, [ORANGE_AREA], True, (0, 165, 255), 3)
-    cv2.polylines(frame, [RED_AREA], True, (0, 0, 255), 3)
+    # Draw polygons for all areas
+    for area in AREAS:
+        cv2.polylines(frame, [area['polygon']], True, area['color'], 3)
 
-    # Add status text at bottom-left
+    # Add status text at bottom-left for all areas
     h, w = frame.shape[:2]
-    y_base = h - 80
+    y_base = h - (40 * (len(area_counts) + 1))  # Dynamic spacing based on number of areas
     
     cv2.putText(frame, f"Total detections: {len(dets)}",
                 (20, y_base), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    cv2.putText(frame, f"RED Area: {red_status} ({red_count})",
-                (20, y_base + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    cv2.putText(frame, f"ORANGE Area: {orange_status} ({orange_count})",
-                (20, y_base + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+    
+    for i, area_data in enumerate(area_counts):
+        y_pos = y_base + 40 * (i + 1)
+        area = next(a for a in AREAS if a['id'] == area_data['id'])
+        text = f"{area['name']}: {area_data['status']} ({area_data['count']})"
+        cv2.putText(frame, text, (20, y_pos), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, area['color'], 2)
     
     # Add timestamp overlay
     frame = add_timestamp_overlay(frame)
@@ -255,13 +284,19 @@ def annotate_frame(frame, dets, confs, orange_count, red_count, orange_status, r
     return frame
 
 
-def send_notification(orange_status, red_status, orange_count, red_count):
+def send_notification(area_counts):
     """Save annotated frame and send Telegram notification"""
-    msg = (
-        "Parking Status\n\n"
-        f"🟧 Orange Area: {orange_status} ({orange_count} motorcycles)\n"
-        f"🟥 Red Area: {red_status} ({red_count} motorcycles)\n"
-    )
+    msg_lines = ["Parking Status\n"]
+    
+    for area_data in area_counts:
+        area = next(a for a in AREAS if a['id'] == area_data['id'])
+        # Use emoji based on area name or id
+        emoji = "🟧" if 'orange' in area['id'].lower() else "🟥" if 'red' in area['id'].lower() else "🔷"
+        msg_lines.append(
+            f"{emoji} {area['name']}: {area_data['status']} ({area_data['count']} motorcycles)"
+        )
+    
+    msg = "\n".join(msg_lines)
     
     try:
         send_telegram_photo(SNAPSHOT_PATH, msg)
@@ -271,17 +306,52 @@ def send_notification(orange_status, red_status, orange_count, red_count):
 
 
 # -------------------------
+# MODEL MANAGEMENT
+# -------------------------
+def check_and_download_model():
+    """Check if model exists, download if needed"""
+    model_path = MODEL_PATH
+    
+    # Check if model file exists
+    if os.path.exists(model_path):
+        file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
+        print(f"✓ Model found: {model_path} ({file_size_mb:.1f} MB)")
+        return True
+    
+    print(f"Model not found: {model_path}")
+    print(f"Downloading YOLOv8 Extra-Large model... (this may take a few minutes)")
+    
+    try:
+        # YOLO() will automatically download if missing
+        model = YOLO(model_path)
+        print(f"✓ Model downloaded successfully: {model_path}")
+        return True
+    except Exception as e:
+        print(f"✗ Error downloading model: {e}")
+        return False
+
+
+# -------------------------
 # MAIN
 # -------------------------
 def main():
+    # Check/download model before starting
+    print("\n" + "="*60)
+    print("Initializing YOLOv8 Parking Monitor")
+    print("="*60)
+    
+    if not check_and_download_model():
+        print("Failed to initialize model. Exiting.")
+        return
+    
     model = YOLO(MODEL_PATH)
     cap = open_capture(RTSP_URL)
     
     consecutive_failures = 0
     max_consecutive_failures = 5
 
-    print("\n" + "="*60)
-    print("YOLOv8 Parking Monitor - Every Minute Capture")
+    print("="*60)
+    print("Starting monitoring loop - Capture every 60 seconds")
     print("="*60)
     print(f"Capture interval: {CAPTURE_INTERVAL}s")
     print(f"Model: {MODEL_PATH}")
@@ -321,25 +391,18 @@ def main():
         analysis = analyze_areas(dets, confs, classes)
         
         print(f"[{time.strftime('%H:%M:%S')}] Detected: {analysis['motorcycles']} motorcycles | Avg conf: {analysis['avg_conf']:.2f}")
-        print(f"  Orange Area: {analysis['orange_status']} ({analysis['orange_count']} motorcycles)")
-        print(f"  Red Area: {analysis['red_status']} ({analysis['red_count']} motorcycles)")
+        for area_data in analysis['areas']:
+            print(f"  {area_data['name']}: {area_data['status']} ({area_data['count']} motorcycles)")
 
         # Annotate frame with detections and status
-        frame = annotate_frame(
-            frame, dets, confs, 
-            analysis['orange_count'], analysis['red_count'],
-            analysis['orange_status'], analysis['red_status']
-        )
+        frame = annotate_frame(frame, dets, confs, analysis['areas'])
         
         # Save snapshot
         cv2.imwrite(SNAPSHOT_PATH, frame)
         print(f"  ✓ Snapshot saved: {SNAPSHOT_PATH}")
 
         # Send notification
-        send_notification(
-            analysis['orange_status'], analysis['red_status'],
-            analysis['orange_count'], analysis['red_count']
-        )
+        send_notification(analysis['areas'])
         
         # Wait for next cycle
         cycle_duration = time.time() - cycle_start
