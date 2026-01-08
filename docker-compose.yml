@@ -11,14 +11,6 @@ services:
       - ./areas.py:/app/areas.py:ro
       # Optional: Mount model cache to avoid re-downloading
       - yolov8-models:/root/.cache/ultralytics
-    networks:
-      - parking-network
-    # Uncomment if you need to access host network (for RTSP on localhost)
-    # network_mode: host
 
 volumes:
   yolov8-models:
-
-networks:
-  parking-network:
-    driver: bridge
