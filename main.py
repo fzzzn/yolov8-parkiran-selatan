@@ -6,8 +6,10 @@ from ultralytics import YOLO # type: ignore
 import os
 import json
 from dotenv import load_dotenv
+from datetime import datetime
+import pytz
 
-from telegram_bot import send_telegram_photo
+from telegram_bot import send_telegram_photo, send_telegram_message, start_telegram_bot
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +20,9 @@ os.environ['OMP_NUM_THREADS'] = '4'
 os.environ['MKL_NUM_THREADS'] = '4'
 # Disable oneDNN for CPU compatibility
 torch.backends.mkldnn.enabled = False
+
+# Timezone for schedule
+WIB = pytz.timezone('Asia/Jakarta')
 
 # Load areas from JSON config
 with open('config.json', 'r') as f:
@@ -285,6 +290,51 @@ def send_notification(area_counts):
         print(f"  ✗ Telegram error: {e}")
 
 
+def is_within_schedule():
+    """Check if current time is within monitoring schedule (06:00-07:40 WIB)"""
+    now = datetime.now(WIB)
+    current_time = now.time()
+    
+    start_time = datetime.strptime("06:00", "%H:%M").time()
+    end_time = datetime.strptime("07:40", "%H:%M").time()
+    
+    return start_time <= current_time <= end_time
+
+
+def perform_detection_cycle(model, cap):
+    """Perform single detection cycle"""
+    print(f"\n[{datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S WIB')}] Starting detection cycle...")
+    
+    # Capture frame
+    cap, frame, success = read_frame(cap, RTSP_URL)
+    
+    if not success or frame is None:
+        print(f"  ✗ Frame capture failed")
+        return cap, False
+    
+    print(f"  ✓ Frame captured successfully")
+    
+    # Detect motorcycles
+    dets, confs, classes = detect_motorcycles(model, frame)
+    
+    # Analyze areas
+    analysis = analyze_areas(dets, confs, classes)
+    
+    print(f"[{datetime.now(WIB).strftime('%H:%M:%S')}] Detected: {analysis['motorcycles']} motorcycles | Avg conf: {analysis['avg_conf']:.2f}")
+    for area_data in analysis['areas']:
+        print(f"  {area_data['name']}: {area_data['status']} ({area_data['count']} motorcycles)")
+    
+    # Annotate and save
+    frame = annotate_frame(frame, dets, confs, analysis['areas'])
+    cv2.imwrite(SNAPSHOT_PATH, frame)
+    print(f"  ✓ Snapshot saved: {SNAPSHOT_PATH}")
+    
+    # Send notification
+    send_notification(analysis['areas'])
+    
+    return cap, True
+
+
 # -------------------------
 # MODEL MANAGEMENT
 # -------------------------
@@ -331,68 +381,69 @@ def main():
     max_consecutive_failures = 5
 
     print("="*60)
-    print("Starting monitoring loop - Capture every 60 seconds")
+    print("Starting monitoring loop")
+    print("Scheduled: 06:00 - 07:40 WIB (Auto)")
+    print("Manual trigger: Send /check to bot (Owner only)")
     print("="*60)
     print(f"Capture interval: {CAPTURE_INTERVAL}s")
     print(f"Model: {MODEL_PATH}")
     print(f"Confidence: {CONF} | IOU: {IOU_THRESHOLD}")
     print("="*60 + "\n")
+    
+    # Manual trigger handler
+    def manual_trigger():
+        nonlocal cap
+        try:
+            cap, success = perform_detection_cycle(model, cap)
+            if not success:
+                send_telegram_message("⚠️ Manual check failed. Camera connection issue.")
+        except Exception as e:
+            print(f"Manual trigger error: {e}")
+            send_telegram_message(f"⚠️ Manual check error: {str(e)}")
+    
+    # Start Telegram bot for manual triggers
+    start_telegram_bot(manual_trigger)
 
     while True:
         cycle_start = time.time()
-        print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting capture cycle...")
-
-        # Capture frame from RTSP
-        cap, frame, success = read_frame(cap, RTSP_URL)
         
-        if not success or frame is None:
+        # Check if within scheduled time
+        if not is_within_schedule():
+            now = datetime.now(WIB)
+            if now.minute % 10 == 0 and now.second < 5:  # Log every 10 minutes
+                print(f"[{now.strftime('%H:%M:%S WIB')}] Outside schedule (06:00-07:40). Waiting... (Manual trigger available via /check)")
+            time.sleep(60)  # Check every minute
+            continue
+        
+        # Perform automatic detection cycle
+        cap, success = perform_detection_cycle(model, cap)
+        
+        if not success:
             consecutive_failures += 1
-            print(f"  ✗ Frame capture failed ({consecutive_failures}/{max_consecutive_failures})")
+            print(f"  ✗ Cycle failed ({consecutive_failures}/{max_consecutive_failures})")
             
             if consecutive_failures >= max_consecutive_failures:
-                print(f"  ⚠ Too many consecutive failures. Waiting {RTSP_RETRY_TIMEOUT}s before retry...")
+                print(f"  ⚠ Too many failures. Reconnecting...")
                 time.sleep(RTSP_RETRY_TIMEOUT)
                 cap.release()
                 cap = open_capture(RTSP_URL)
                 consecutive_failures = 0
             
-            # Wait before next cycle
             time.sleep(CAPTURE_INTERVAL)
             continue
         
-        # Reset failure counter on success
+        # Reset failure counter
         consecutive_failures = 0
-        print(f"  ✓ Frame captured successfully")
-
-        # Detect motorcycles
-        dets, confs, classes = detect_motorcycles(model, frame)
-
-        # Analyze areas and get status
-        analysis = analyze_areas(dets, confs, classes)
-        
-        print(f"[{time.strftime('%H:%M:%S')}] Detected: {analysis['motorcycles']} motorcycles | Avg conf: {analysis['avg_conf']:.2f}")
-        for area_data in analysis['areas']:
-            print(f"  {area_data['name']}: {area_data['status']} ({area_data['count']} motorcycles)")
-
-        # Annotate frame with detections and status
-        frame = annotate_frame(frame, dets, confs, analysis['areas'])
-        
-        # Save snapshot
-        cv2.imwrite(SNAPSHOT_PATH, frame)
-        print(f"  ✓ Snapshot saved: {SNAPSHOT_PATH}")
-
-        # Send notification
-        send_notification(analysis['areas'])
         
         # Wait for next cycle
         cycle_duration = time.time() - cycle_start
         sleep_time = max(0, CAPTURE_INTERVAL - cycle_duration)
         
         if sleep_time > 0:
-            print(f"  ⏳ Cycle completed in {cycle_duration:.1f}s. Waiting {sleep_time:.1f}s until next capture...")
+            print(f"  ⏳ Cycle completed in {cycle_duration:.1f}s. Waiting {sleep_time:.1f}s...")
             time.sleep(sleep_time)
         else:
-            print(f"  ⚠ Cycle took {cycle_duration:.1f}s (longer than {CAPTURE_INTERVAL}s interval)")
+            print(f"  ⚠ Cycle took {cycle_duration:.1f}s (longer than {CAPTURE_INTERVAL}s)")
 
 
 if __name__ == "__main__":
