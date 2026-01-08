@@ -6,9 +6,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - YOLO_CONFIG_DIR=/tmp/Ultralytics
     volumes:
-      # Mount areas.py if you need to update parking areas without rebuilding
-      - ./areas.py:/app/areas.py:ro
+      # Mount config.json if you need to update parking areas without rebuilding
+      - ./config.json:/app/config.json:ro
       # Optional: Mount model cache to avoid re-downloading
       - yolov8-models:/root/.cache/ultralytics
 
