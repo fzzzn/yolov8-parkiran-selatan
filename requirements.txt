@@ -3,5 +3,4 @@ ultralytics
 numpy
 requests
 python-dotenv
-python-telegram-bot
 pytz
