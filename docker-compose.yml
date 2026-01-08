@@ -1,0 +1,24 @@
+services:
+  yolov8-parkiran-selatan:
+    image: yolov8-parkiran-selatan
+    container_name: yolov8-parkiran-selatan
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount areas.py if you need to update parking areas without rebuilding
+      - ./areas.py:/app/areas.py:ro
+      # Optional: Mount model cache to avoid re-downloading
+      - yolov8-models:/root/.cache/ultralytics
+    networks:
+      - parking-network
+    # Uncomment if you need to access host network (for RTSP on localhost)
+    # network_mode: host
+
+volumes:
+  yolov8-models:
+
+networks:
+  parking-network:
+    driver: bridge
