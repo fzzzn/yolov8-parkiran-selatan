@@ -139,6 +139,138 @@ def add_timestamp_overlay(frame):
 
 
 # -------------------------
+# DETECTION & ANALYSIS
+# -------------------------
+def detect_motorcycles(model, frame):
+    """Run YOLO detection and return filtered detections within defined areas"""
+    # Preprocess frame for better detection
+    processed_frame = preprocess_frame(frame)
+
+    # YOLO inference with advanced settings
+    results = model(
+        processed_frame,
+        conf=CONF,
+        iou=IOU_THRESHOLD,
+        imgsz=IMG_SIZE,
+        classes=DETECT_CLASSES,
+        verbose=False,
+        agnostic_nms=False,
+        max_det=MAX_DET,
+        augment=USE_TTA,
+        retina_masks=True
+    )
+
+    # Collect all boxes with confidence scores
+    dets = []
+    confs = []
+    classes = []
+    for r in results:
+        if r.boxes is None:
+            continue
+        dets.extend(r.boxes.xyxy.cpu().numpy())
+        confs.extend(r.boxes.conf.cpu().numpy())
+        classes.extend(r.boxes.cls.cpu().numpy())
+
+    dets = np.array(dets) if len(dets) else np.empty((0, 4), dtype=np.float32)
+    confs = np.array(confs) if len(confs) else np.empty(0, dtype=np.float32)
+    classes = np.array(classes) if len(classes) else np.empty(0, dtype=np.float32)
+
+    # Filter by minimum area
+    if len(dets) > 0:
+        widths = dets[:, 2] - dets[:, 0]
+        heights = dets[:, 3] - dets[:, 1]
+        areas = widths * heights
+        valid_mask = areas > MIN_AREA
+        dets = dets[valid_mask]
+        confs = confs[valid_mask]
+        classes = classes[valid_mask]
+    
+    # Filter to only keep detections within orange or red areas
+    if len(dets) > 0:
+        in_area_mask = np.zeros(len(dets), dtype=bool)
+        for i, box in enumerate(dets):
+            cx, cy = box_center_xy(box)
+            if point_in_poly((cx, cy), ORANGE_AREA) or point_in_poly((cx, cy), RED_AREA):
+                in_area_mask[i] = True
+        
+        dets = dets[in_area_mask]
+        confs = confs[in_area_mask]
+        classes = classes[in_area_mask]
+
+    return dets, confs, classes
+
+
+def analyze_areas(dets, confs, classes):
+    """Count motorcycles in each area and determine status"""
+    motorcycles = np.sum(classes == MOTORCYCLE_CLASS) if len(classes) > 0 else 0
+    avg_conf = np.mean(confs) if len(confs) > 0 else 0
+
+    orange_count = count_motorcycles_in_area(dets, ORANGE_AREA)
+    red_count = count_motorcycles_in_area(dets, RED_AREA)
+    
+    orange_status = "DETECTED" if orange_count > 0 else "EMPTY"
+    red_status = "DETECTED" if red_count > 0 else "EMPTY"
+
+    return {
+        'motorcycles': motorcycles,
+        'avg_conf': avg_conf,
+        'orange_count': orange_count,
+        'red_count': red_count,
+        'orange_status': orange_status,
+        'red_status': red_status
+    }
+
+
+def annotate_frame(frame, dets, confs, orange_count, red_count, orange_status, red_status):
+    """Add all visual annotations to the frame"""
+    # Draw bounding boxes with confidence
+    for i, box in enumerate(dets):
+        x1, y1, x2, y2 = map(int, box)
+        conf = confs[i] if i < len(confs) else 0
+        color = (0, 255, 0)  # Green for motorcycles
+        
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        label = f"M: {conf:.2f}"
+        cv2.putText(frame, label, (x1, y1-5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+    # Draw polygons
+    cv2.polylines(frame, [ORANGE_AREA], True, (0, 165, 255), 3)
+    cv2.polylines(frame, [RED_AREA], True, (0, 0, 255), 3)
+
+    # Add status text at bottom-left
+    h, w = frame.shape[:2]
+    y_base = h - 80
+    
+    cv2.putText(frame, f"Total detections: {len(dets)}",
+                (20, y_base), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    cv2.putText(frame, f"RED Area: {red_status} ({red_count})",
+                (20, y_base + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    cv2.putText(frame, f"ORANGE Area: {orange_status} ({orange_count})",
+                (20, y_base + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+    
+    # Add timestamp overlay
+    frame = add_timestamp_overlay(frame)
+    
+    return frame
+
+
+def send_notification(orange_status, red_status, orange_count, red_count):
+    """Save annotated frame and send Telegram notification"""
+    msg = (
+        "Parking Status\n\n"
+        f"🟧 Orange Area: {orange_status} ({orange_count} motorcycles)\n"
+        f"🟥 Red Area: {red_status} ({red_count} motorcycles)\n"
+    )
+    
+    try:
+        send_telegram_photo(SNAPSHOT_PATH, msg)
+        print(f"  ✓ Telegram notification sent successfully")
+    except Exception as e:
+        print(f"  ✗ Telegram error: {e}")
+
+
+# -------------------------
 # MAIN
 # -------------------------
 def main():
@@ -182,131 +314,32 @@ def main():
         consecutive_failures = 0
         print(f"  ✓ Frame captured successfully")
 
-        # Preprocess frame for better detection
-        processed_frame = preprocess_frame(frame)
+        # Detect motorcycles
+        dets, confs, classes = detect_motorcycles(model, frame)
 
-        # YOLO inference with advanced settings
-        results = model(
-            processed_frame,
-            conf=CONF,
-            iou=IOU_THRESHOLD,
-            imgsz=IMG_SIZE,
-            classes=DETECT_CLASSES,
-            verbose=False,
-            agnostic_nms=False,
-            max_det=MAX_DET,
-            augment=USE_TTA,
-            retina_masks=True  # Better segmentation for overlapping objects
+        # Analyze areas and get status
+        analysis = analyze_areas(dets, confs, classes)
+        
+        print(f"[{time.strftime('%H:%M:%S')}] Detected: {analysis['motorcycles']} motorcycles | Avg conf: {analysis['avg_conf']:.2f}")
+        print(f"  Orange Area: {analysis['orange_status']} ({analysis['orange_count']} motorcycles)")
+        print(f"  Red Area: {analysis['red_status']} ({analysis['red_count']} motorcycles)")
+
+        # Annotate frame with detections and status
+        frame = annotate_frame(
+            frame, dets, confs, 
+            analysis['orange_count'], analysis['red_count'],
+            analysis['orange_status'], analysis['red_status']
         )
-
-        # Collect all boxes with confidence scores
-        dets = []
-        confs = []
-        classes = []
-        for r in results:
-            if r.boxes is None:
-                continue
-            dets.extend(r.boxes.xyxy.cpu().numpy())
-            confs.extend(r.boxes.conf.cpu().numpy())
-            classes.extend(r.boxes.cls.cpu().numpy())
-
-        dets = np.array(dets) if len(
-            dets) else np.empty((0, 4), dtype=np.float32)
-        confs = np.array(confs) if len(
-            confs) else np.empty(0, dtype=np.float32)
-        classes = np.array(classes) if len(
-            classes) else np.empty(0, dtype=np.float32)
-
-        # Apply additional filtering
-        # Keep only detections with reasonable size
-        if len(dets) > 0:
-            widths = dets[:, 2] - dets[:, 0]
-            heights = dets[:, 3] - dets[:, 1]
-            areas = widths * heights
-            # Filter: area > MIN_AREA pixels (reduced for crowded scenes)
-            valid_mask = areas > MIN_AREA
-            dets = dets[valid_mask]
-            confs = confs[valid_mask]
-            classes = classes[valid_mask]
         
-        # Filter to only keep detections within orange or red areas
-        if len(dets) > 0:
-            in_area_mask = np.zeros(len(dets), dtype=bool)
-            for i, box in enumerate(dets):
-                cx, cy = box_center_xy(box)
-                if point_in_poly((cx, cy), ORANGE_AREA) or point_in_poly((cx, cy), RED_AREA):
-                    in_area_mask[i] = True
-            
-            dets = dets[in_area_mask]
-            confs = confs[in_area_mask]
-            classes = classes[in_area_mask]
-
-        # Debug: print total detections with details
-        motorcycles = np.sum(classes == MOTORCYCLE_CLASS) if len(
-            classes) > 0 else 0
-        avg_conf = np.mean(confs) if len(confs) > 0 else 0
-
-        print(f"[{time.strftime('%H:%M:%S')}] Detected: {motorcycles} motorcycles | Avg conf: {avg_conf:.2f}")
-
-        orange_count = count_motorcycles_in_area(dets, ORANGE_AREA)
-        red_count = count_motorcycles_in_area(dets, RED_AREA)
-        
-        # Simple presence detection
-        orange_status = "DETECTED" if orange_count > 0 else "EMPTY"
-        red_status = "DETECTED" if red_count > 0 else "EMPTY"
-
-        print(f"  Orange Area: {orange_status} ({orange_count} motorcycles)")
-        print(f"  Red Area: {red_status} ({red_count} motorcycles)")
-
-        # Annotate frame for snapshot
-        # draw bounding boxes with confidence
-        for i, box in enumerate(dets):
-            x1, y1, x2, y2 = map(int, box)
-            conf = confs[i] if i < len(confs) else 0
-
-            # Green for motorcycles
-            color = (0, 255, 0)
-            
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-            # Add confidence label
-            label = f"M: {conf:.2f}"
-            cv2.putText(frame, label, (x1, y1-5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-
-        # draw polygons
-        cv2.polylines(frame, [ORANGE_AREA], True, (0, 165, 255), 3)
-        cv2.polylines(frame, [RED_AREA], True, (0, 0, 255), 3)
-
-        # label status text at bottom-left
-        h, w = frame.shape[:2]
-        y_base = h - 80  # Start from bottom
-        
-        cv2.putText(frame, f"Total detections: {len(dets)}",
-                    (20, y_base), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"RED Area: {red_status} ({red_count})",
-                    (20, y_base + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(frame, f"ORANGE Area: {orange_status} ({orange_count})",
-                    (20, y_base + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-        
-        # Add timestamp overlay
-        frame = add_timestamp_overlay(frame)
-        
-        # Save and send to Telegram
+        # Save snapshot
         cv2.imwrite(SNAPSHOT_PATH, frame)
         print(f"  ✓ Snapshot saved: {SNAPSHOT_PATH}")
 
-        msg = (
-            "Parking Status\n\n"
-            f"🟧 Orange Area: {orange_status} ({orange_count} motorcycles)\n"
-            f"🟥 Red Area: {red_status} ({red_count} motorcycles)\n"
+        # Send notification
+        send_notification(
+            analysis['orange_status'], analysis['red_status'],
+            analysis['orange_count'], analysis['red_count']
         )
-
-        try:
-            send_telegram_photo(SNAPSHOT_PATH, msg)
-            print(f"  ✓ Telegram notification sent successfully")
-        except Exception as e:
-            print(f"  ✗ Telegram error: {e}")
         
         # Wait for next cycle
         cycle_duration = time.time() - cycle_start
