@@ -10,5 +10,5 @@ __pycache__/
 dist/
 build/
 venv/
-yolov8x.pt
+yolov8*.pt
 test_frame.jpg

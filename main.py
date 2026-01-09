@@ -347,26 +347,53 @@ def extract_camera_timestamp(frame):
     try:
         h, w = frame.shape[:2]
         
-        # Extract top-left region where camera timestamp typically appears
-        roi = frame[0:80, 0:400]  # Top-left corner
+        # Extract larger top-left region where camera timestamp typically appears
+        # Format: DD-MM-YYYY HH:MM:SS
+        roi = frame[0:120, 0:700]  # Increased size for better capture
         
-        # Preprocess for better OCR
+        # Save original ROI for debugging
+        cv2.imwrite('/tmp/ocr_roi_original.jpg', roi)
+        
+        # Try multiple preprocessing methods
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
         
-        # Read text using OCR
+        # Method 1: Adaptive threshold
+        thresh1 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY, 11, 2)
+        cv2.imwrite('/tmp/ocr_roi_thresh1.jpg', thresh1)
+        
+        # Method 2: Inverse adaptive threshold (for white text on dark background)
+        thresh2 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY_INV, 11, 2)
+        cv2.imwrite('/tmp/ocr_roi_thresh2.jpg', thresh2)
+        
+        # Method 3: Simple threshold
+        _, thresh3 = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+        cv2.imwrite('/tmp/ocr_roi_thresh3.jpg', thresh3)
+        
+        # Method 4: Inverse simple threshold
+        _, thresh4 = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
+        cv2.imwrite('/tmp/ocr_roi_thresh4.jpg', thresh4)
+        
+        # Try OCR on original ROI first
         reader = get_ocr_reader()
-        results = reader.readtext(thresh, detail=0)
-        
-        # Combine all detected text
+        results = reader.readtext(roi, detail=0)
         timestamp_text = ' '.join(results).strip()
         
         if timestamp_text:
-            print(f"  Camera timestamp: {timestamp_text}")
+            print(f"  Camera timestamp (original): {timestamp_text}")
             return timestamp_text
-        else:
-            print(f"  No timestamp detected")
-            return None
+        
+        # Try with each preprocessing method
+        for i, thresh in enumerate([thresh1, thresh2, thresh3, thresh4], 1):
+            results = reader.readtext(thresh, detail=0)
+            timestamp_text = ' '.join(results).strip()
+            if timestamp_text:
+                print(f"  Camera timestamp (method {i}): {timestamp_text}")
+                return timestamp_text
+        
+        print(f"  No timestamp detected (check /tmp/ocr_roi_*.jpg for debug)")
+        return None
             
     except Exception as e:
         print(f"  Error reading timestamp: {e}")
