@@ -3,7 +3,8 @@
     "start_time": "06:00",
     "end_time": "07:00",
     "timezone": "Asia/Jakarta",
-    "capture_interval": 60
+    "capture_interval": 60,
+    "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
   },
   "areas": [
     {

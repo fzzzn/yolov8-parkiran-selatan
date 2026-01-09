@@ -44,9 +44,11 @@ SCHEDULE_START = schedule_config['start_time']
 SCHEDULE_END = schedule_config['end_time']
 TIMEZONE = schedule_config['timezone']
 CAPTURE_INTERVAL = schedule_config.get('capture_interval', 60)  # Default 60 seconds
+SCHEDULE_DAYS = schedule_config.get('days', ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])  # Default all days
 WIB = pytz.timezone(TIMEZONE)
 
 print(f"Schedule: {SCHEDULE_START} - {SCHEDULE_END} {TIMEZONE}")
+print(f"Active days: {', '.join(SCHEDULE_DAYS)}")
 print(f"Capture interval: {CAPTURE_INTERVAL}s")
 
 # Parse areas dynamically
@@ -332,9 +334,14 @@ def send_notification(area_counts):
 
 
 def is_within_schedule():
-    """Check if current time is within monitoring schedule"""
+    """Check if current time and day is within monitoring schedule"""
     now = datetime.now(WIB)
     current_time = now.time()
+    current_day = now.strftime('%A')  # Monday, Tuesday, etc.
+    
+    # Check if current day is in allowed days
+    if current_day not in SCHEDULE_DAYS:
+        return False
     
     start_time = datetime.strptime(SCHEDULE_START, "%H:%M").time()
     end_time = datetime.strptime(SCHEDULE_END, "%H:%M").time()
