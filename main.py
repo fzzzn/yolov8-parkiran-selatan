@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime
 import pytz
+import easyocr
 
 from telegram_bot import send_telegram_photo, send_telegram_message, start_telegram_bot
 
@@ -65,6 +66,21 @@ MIN_AREA = 150  # Very small minimum area for distant/partial motorcycles
 # Where to save telegram snapshot
 SNAPSHOT_PATH = "/tmp/parking_status.jpg"
 
+# Global state for change detection
+previous_camera_timestamp = None
+
+# Initialize OCR reader (do this once globally)
+ocr_reader = None
+
+def get_ocr_reader():
+    """Lazy load OCR reader"""
+    global ocr_reader
+    if ocr_reader is None:
+        print("Initializing OCR reader...")
+        ocr_reader = easyocr.Reader(['en'], gpu=False)
+        print("✓ OCR reader initialized")
+    return ocr_reader
+
 
 # -------------------------
 # GEOMETRY HELPERS
@@ -108,15 +124,21 @@ def count_motorcycles_per_area(dets):
 # -------------------------
 def open_capture(url):
     cap = cv2.VideoCapture(url)
-    # optional tuning
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+    # Minimize buffer to get latest frame
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
 
 def read_frame(cap, url, max_retries=3):
-    """Attempt to read frame with retry logic"""
+    """Attempt to read frame with retry logic - always get latest frame"""
     for attempt in range(max_retries):
-        ret, frame = cap.read()
+        # Flush buffer by reading multiple frames to get the latest one
+        for _ in range(5):  # Read and discard 4 old frames
+            cap.grab()
+        
+        # Get the latest frame
+        ret, frame = cap.retrieve()
+        
         if ret and frame is not None:
             return cap, frame, True
         
@@ -301,8 +323,41 @@ def is_within_schedule():
     return start_time <= current_time <= end_time
 
 
-def perform_detection_cycle(model, cap):
+def extract_camera_timestamp(frame):
+    """Extract timestamp from camera overlay (top-left corner)"""
+    try:
+        h, w = frame.shape[:2]
+        
+        # Extract top-left region where camera timestamp typically appears
+        roi = frame[0:80, 0:400]  # Top-left corner
+        
+        # Preprocess for better OCR
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        
+        # Read text using OCR
+        reader = get_ocr_reader()
+        results = reader.readtext(thresh, detail=0)
+        
+        # Combine all detected text
+        timestamp_text = ' '.join(results).strip()
+        
+        if timestamp_text:
+            print(f"  Camera timestamp: {timestamp_text}")
+            return timestamp_text
+        else:
+            print(f"  No timestamp detected")
+            return None
+            
+    except Exception as e:
+        print(f"  Error reading timestamp: {e}")
+        return None
+
+
+def perform_detection_cycle(model, cap, force_notify=False):
     """Perform single detection cycle"""
+    global previous_camera_timestamp
+    
     print(f"\n[{datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S WIB')}] Starting detection cycle...")
     
     # Capture frame
@@ -313,6 +368,20 @@ def perform_detection_cycle(model, cap):
         return cap, False
     
     print(f"  ✓ Frame captured successfully")
+    
+    # Extract camera timestamp from frame overlay
+    current_timestamp = extract_camera_timestamp(frame)
+    
+    # Check if timestamp changed (camera is live)
+    if not force_notify and previous_camera_timestamp is not None:
+        if current_timestamp and current_timestamp == previous_camera_timestamp:
+            print(f"  ℹ Camera timestamp unchanged - feed may be frozen, skipping")
+            return cap, True
+        elif current_timestamp and current_timestamp != previous_camera_timestamp:
+            print(f"  ✓ Camera timestamp changed - feed is live")
+    
+    # Update timestamp for next comparison
+    previous_camera_timestamp = current_timestamp
     
     # Detect motorcycles
     dets, confs, classes = detect_motorcycles(model, frame)
@@ -394,7 +463,7 @@ def main():
     def manual_trigger():
         nonlocal cap
         try:
-            cap, success = perform_detection_cycle(model, cap)
+            cap, success = perform_detection_cycle(model, cap, force_notify=True)
             if not success:
                 send_telegram_message("⚠️ Manual check failed. Camera connection issue.")
         except Exception as e:
