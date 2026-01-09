@@ -291,12 +291,12 @@ def send_notification(area_counts):
 
 
 def is_within_schedule():
-    """Check if current time is within monitoring schedule (06:00-07:40 WIB)"""
+    """Check if current time is within monitoring schedule (06:00-07:00 WIB)"""
     now = datetime.now(WIB)
     current_time = now.time()
     
     start_time = datetime.strptime("06:00", "%H:%M").time()
-    end_time = datetime.strptime("07:40", "%H:%M").time()
+    end_time = datetime.strptime("07:00", "%H:%M").time()
     
     return start_time <= current_time <= end_time
 
@@ -382,7 +382,7 @@ def main():
 
     print("="*60)
     print("Starting monitoring loop")
-    print("Scheduled: 06:00 - 07:40 WIB (Auto)")
+    print("Scheduled: 06:00 - 07:00 WIB (Auto)")
     print("Manual trigger: Send /check to bot (Owner only)")
     print("="*60)
     print(f"Capture interval: {CAPTURE_INTERVAL}s")
@@ -411,7 +411,7 @@ def main():
         if not is_within_schedule():
             now = datetime.now(WIB)
             if now.minute % 10 == 0 and now.second < 5:  # Log every 10 minutes
-                print(f"[{now.strftime('%H:%M:%S WIB')}] Outside schedule (06:00-07:40). Waiting... (Manual trigger available via /check)")
+                print(f"[{now.strftime('%H:%M:%S WIB')}] Outside schedule (06:00-07:00). Waiting... (Manual trigger available via /check)")
             time.sleep(60)  # Check every minute
             continue
         
