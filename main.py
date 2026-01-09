@@ -29,6 +29,22 @@ WIB = pytz.timezone('Asia/Jakarta')
 with open('config.json', 'r') as f:
     config = json.load(f)
 
+# Load schedule configuration
+schedule_config = config.get('schedule', {
+    'start_time': '06:00',
+    'end_time': '07:00',
+    'timezone': 'Asia/Jakarta'
+})
+
+SCHEDULE_START = schedule_config['start_time']
+SCHEDULE_END = schedule_config['end_time']
+TIMEZONE = schedule_config['timezone']
+CAPTURE_INTERVAL = schedule_config.get('capture_interval', 60)  # Default 60 seconds
+WIB = pytz.timezone(TIMEZONE)
+
+print(f"Schedule: {SCHEDULE_START} - {SCHEDULE_END} {TIMEZONE}")
+print(f"Capture interval: {CAPTURE_INTERVAL}s")
+
 # Parse areas dynamically
 AREAS = []
 for area_config in config['areas']:
@@ -45,7 +61,6 @@ print(f"Loaded {len(AREAS)} parking areas: {', '.join([a['name'] for a in AREAS]
 # CONFIG
 # -------------------------
 RTSP_URL = os.getenv("RTSP_URL")
-CAPTURE_INTERVAL = 60  # seconds - capture, analyze, and send every minute
 RTSP_RETRY_TIMEOUT = 10  # seconds to wait before retrying failed RTSP connection
 
 # YOLO model: use yolov8m.pt for good detection with CPU compatibility
@@ -313,12 +328,12 @@ def send_notification(area_counts):
 
 
 def is_within_schedule():
-    """Check if current time is within monitoring schedule (06:00-07:00 WIB)"""
+    """Check if current time is within monitoring schedule"""
     now = datetime.now(WIB)
     current_time = now.time()
     
-    start_time = datetime.strptime("06:00", "%H:%M").time()
-    end_time = datetime.strptime("07:00", "%H:%M").time()
+    start_time = datetime.strptime(SCHEDULE_START, "%H:%M").time()
+    end_time = datetime.strptime(SCHEDULE_END, "%H:%M").time()
     
     return start_time <= current_time <= end_time
 
@@ -451,7 +466,7 @@ def main():
 
     print("="*60)
     print("Starting monitoring loop")
-    print("Scheduled: 06:00 - 07:00 WIB (Auto)")
+    print(f"Scheduled: {SCHEDULE_START} - {SCHEDULE_END} {TIMEZONE} (Auto)")
     print("Manual trigger: Send /check to bot (Owner only)")
     print("="*60)
     print(f"Capture interval: {CAPTURE_INTERVAL}s")
@@ -480,7 +495,7 @@ def main():
         if not is_within_schedule():
             now = datetime.now(WIB)
             if now.minute % 10 == 0 and now.second < 5:  # Log every 10 minutes
-                print(f"[{now.strftime('%H:%M:%S WIB')}] Outside schedule (06:00-07:00). Waiting... (Manual trigger available via /check)")
+                print(f"[{now.strftime('%H:%M:%S %Z')}] Outside schedule ({SCHEDULE_START}-{SCHEDULE_END}). Waiting... (Manual trigger available via /check)")
             time.sleep(60)  # Check every minute
             continue
         
