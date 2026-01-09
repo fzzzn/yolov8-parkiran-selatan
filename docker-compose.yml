@@ -10,6 +10,8 @@ services:
       - TZ=Asia/Jakarta
       - YOLO_CONFIG_DIR=/tmp/Ultralytics
       - NNPACK_DISABLE=1
+      - PYTORCH_ENABLE_MPS_FALLBACK=1
+      - TORCH_CPP_LOG_LEVEL=ERROR
     volumes:
       # Mount config.json if you need to update parking areas without rebuilding
       - ./config.json:/app/config.json:ro

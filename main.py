@@ -19,8 +19,12 @@ load_dotenv()
 torch.set_num_threads(4)
 os.environ['OMP_NUM_THREADS'] = '4'
 os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['TORCH_CPP_LOG_LEVEL'] = 'ERROR'  # Suppress NNPACK warnings
 # Disable oneDNN for CPU compatibility
 torch.backends.mkldnn.enabled = False
+
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 
 # Timezone for schedule
 WIB = pytz.timezone('Asia/Jakarta')
